@@ -54,6 +54,9 @@ contract SimpleICO is UniversalScheme {
         bool isHalted; // The admin of the ICO can halt the ICO at any time, and also resume it.
     }
 
+    mapping (bytes32 => (address => uint)) deposits;
+    mapping (bytes32 => (address => uint)) withdrawAmount;
+
     // A mapping from hashes to parameters (use to store a particular configuration on the controller)
     struct Parameters {
         uint cap; // Cap in Eth
@@ -62,6 +65,7 @@ contract SimpleICO is UniversalScheme {
         uint endBlock;
         address beneficiary; // all funds received will be transferred to this address.
         address admin; // The admin can halt or resume ICO.
+        uint status; // 0 = inactive, 1 = active, 2 = closed + successful, 3 = closed + failed
     }
 
     // A mapping from the organization (Avatar) address to the saved data of the organization:
@@ -156,12 +160,77 @@ contract SimpleICO is UniversalScheme {
      */
     function start(Avatar _avatar) public {
         require(!isActive(_avatar));
+
         Organization memory org;
         org.paramsHash = getParametersFromController(_avatar);
-        require(parameters[org.paramsHash].cap != 0);
+        Parameters storage params = parameters[org.paramsHash];
+        require(params.cap != 0);
+        require(params.status == 0);
         org.avatarContractICO = new MirrorContractICO(_avatar, this);
         organizationsICOInfo[_avatar] = org;
+        params.status = 1;
     }
+
+    function close(Avatar _avatar) public {
+        Organization memory org = organizationsICOInfo[_avatar];
+
+        // storage gets it as reference so updating params changes the mapping object
+        Parameters storage params = parameters[org.paramsHash];
+
+        // Shouldn't have closed it yet, also should have started
+        require (params.status == 1);
+
+        // Should've started
+        if (block.number <= params.startBlock) {
+            return false;
+        }
+
+        // Can't end right now. There's time left and also haven't raised all the money
+        if (block.number <= params.endBlock && org.totalEthRaised < params.cap) {
+            return false;
+        }
+        
+        /*
+            Ready to finish: either fully raised or finished time period (or both)
+        */ 
+
+        // This is great because now we can send money to the beneficiary
+        if (org.totalEthRaised >= params.cap) {
+            if (!params.beneficiary.transfer(org.totalEthRaised)) {
+                // Fail if can't send money to beneficiary
+                revert();
+            }
+            params.status = 2; 
+        } else {
+            params.status = 3;
+        }
+        
+        return true;
+    }
+
+    function withdraw(address) public {
+        Organization memory org = organizationsICOInfo[_avatar];
+        Parameters memory params = parameters[org.paramsHash];
+
+        // Send back excess amounts
+        if (params.status == 2 || params.status == 3) {
+            var amount = withdrawAmount[org.paramsHash][msg.sender];
+            withdrawAmount[org.paramsHash][msg.sender] = 0;
+            if (!msg.sender.transfer(amount)) {
+                withdrawAmount[org.paramsHash][msg.sender] = amount;
+            }
+        } 
+
+        // Send back donations if failed. 
+        if (params.status == 3) {
+            var amount = deposits[org.paramsHash][msg.sender];
+            deposits[org.paramsHash][msg.sender] = 0;
+            if (!msg.sender.transfer(amount)) {
+                deposits[org.paramsHash][msg.sender] = amount;
+            }
+        }
+    }
+
 
     /**
      * @dev Allowing admin to halt an ICO.
@@ -193,6 +262,10 @@ contract SimpleICO is UniversalScheme {
         Organization memory org = organizationsICOInfo[_avatar];
         Parameters memory params = parameters[org.paramsHash];
 
+        if (params.status != 1) {
+            return false;
+        }
+
         if (org.totalEthRaised >= params.cap) {
             return false;
         }
@@ -202,6 +275,7 @@ contract SimpleICO is UniversalScheme {
         if (block.number <= params.startBlock) {
             return false;
         }
+
         return true;
     }
 
@@ -223,28 +297,25 @@ contract SimpleICO is UniversalScheme {
         // Check ICO is not halted:
         require(!org.isHalted);
 
-
         uint incomingEther;
-        uint change;
+        uint change = 0;
 
-        // Compute how much tokens to buy:
         if ( msg.value > (params.cap).sub(org.totalEthRaised) ) {
             incomingEther = (params.cap).sub(org.totalEthRaised);
             change = (msg.value).sub(incomingEther);
         } else {
             incomingEther = msg.value;
         }
-        uint tokens = incomingEther.mul(params.price);
-        // Send ether to the defined address, mint, and send change to beneficiary:
-        params.beneficiary.transfer(incomingEther);
+        uint tokens = 1;
+        
+        deposits[org.paramsHash][msg.sender] += incomingEther;
+        withdrawAmount[orgs.paramsHash][msg.sender] += change;
 
         ControllerInterface controller = ControllerInterface(_avatar.owner());
-        if (!controller.mintTokens(tokens, _beneficiary,address(_avatar))) {
+        if (!controller.mintTokens(tokens, _beneficiary, address(_avatar))) {
             revert();
         }
-        if (change != 0) {
-            _beneficiary.transfer(change);
-        }
+
         // Update total raised, call event and return amount of tokens bought:
         organizationsICOInfo[_avatar].totalEthRaised += incomingEther;
         DonationReceived(_avatar, _beneficiary, incomingEther, tokens);
