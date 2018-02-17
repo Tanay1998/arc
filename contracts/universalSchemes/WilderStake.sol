@@ -1,6 +1,8 @@
 pragma solidity ^0.4.19;
 
 import "./UniversalScheme.sol";
+import "../controller/Reputation.sol";
+import "../controller/DAOToken.sol";
 import "zeppelin-solidity/contracts/ownership/Ownable.sol";
 import "zeppelin-solidity/contracts/math/SafeMath.sol";
 import "zeppelin-solidity/contracts/lifecycle/Destructible.sol";
@@ -52,6 +54,8 @@ contract SimpleICO is UniversalScheme {
         address avatarContractICO; // Avatar is a contract for users that want to send ether without calling a function.
         uint totalEthRaised;
         bool isHalted; // The admin of the ICO can halt the ICO at any time, and also resume it.
+        Reputation rep;
+        DAOToken token;
     }
 
     mapping (bytes32 => (address => uint)) deposits;
@@ -158,17 +162,24 @@ contract SimpleICO is UniversalScheme {
      * @dev start an ICO
      * @param _avatar The Avatar's of the organization
      */
-    function start(Avatar _avatar) public {
+    function start(Avatar _avatar, string _tokenName, string _tokenSymbol) public {
         require(!isActive(_avatar));
 
         Organization memory org;
+
         org.paramsHash = getParametersFromController(_avatar);
         Parameters storage params = parameters[org.paramsHash];
         require(params.cap != 0);
         require(params.status == 0);
+        params.status = 1;
+
         org.avatarContractICO = new MirrorContractICO(_avatar, this);
         organizationsICOInfo[_avatar] = org;
-        params.status = 1;
+
+        org.rep = new Reputation();
+        org.token = new DAOToken(_tokenName, _tokenSymbol);
+        ControllerInterface controller = ControllerInterface(_avatar.owner());
+        org.rep.transferOwnership(controller);
     }
 
     function close(Avatar _avatar) public {
@@ -311,10 +322,8 @@ contract SimpleICO is UniversalScheme {
         deposits[org.paramsHash][msg.sender] += incomingEther;
         withdrawAmount[orgs.paramsHash][msg.sender] += change;
 
-        ControllerInterface controller = ControllerInterface(_avatar.owner());
-        if (!controller.mintTokens(tokens, _beneficiary, address(_avatar))) {
-            revert();
-        }
+        org.token.mint(msg.sender, tokens);
+        org.rep.mint(msg.sender, incomingEther);
 
         // Update total raised, call event and return amount of tokens bought:
         organizationsICOInfo[_avatar].totalEthRaised += incomingEther;
